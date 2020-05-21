@@ -26,19 +26,32 @@ type HackerNewsItem = {
     Id: int
     Title: string
     Url: string option
+    Score: int
+}
+
+
+[<RequireQualifiedAccess>]
+type Story =
+    | New 
+    | Top 
+    | Best 
+    | Job 
+
+
+type State = {
+    CurrentStory: Story
+    StoryItems: ValueStatus<Result<HackerNewsItem list, string>>
 }
 
 
 type Msg =
+    | ChangeStory of Story
     | LoadStoryItems of AsyncStatus<Result<HackerNewsItem list, string>>
 
 
-type State = {
-    StoryItems: ValueStatus<Result<HackerNewsItem list, string>>
-}
 
 let init() =
-    let initState = { StoryItems = NotStarted }
+    let initState = { CurrentStory = Story.New; StoryItems = NotStarted }
     let initCommand = Cmd.ofMsg (LoadStoryItems Started)
     initState, initCommand
 
@@ -85,7 +98,8 @@ let hackerNewsItemDecoder : Decoder<HackerNewsItem> =
     {
         Id = field.Required.At [ "id" ] Decode.int
         Title = field.Required.At [ "title" ] Decode.string
-        Url = field.Optional.At ["url"] Decode.string
+        Url = field.Optional.At [ "url" ] Decode.string
+        Score = field.Required.At [ "score" ] Decode.int
     })
 
  
@@ -109,9 +123,18 @@ let fetchStoryItem (id: int) =
         | _   -> return None
     }
 
+let storiesEndpoint story =
+    let fromBaseUrl = sprintf "https://hacker-news.firebaseio.com/v0/%sstories.json"
 
-let fetchStoryItems =
-    let url = "https://hacker-news.firebaseio.com/v0/topstories.json"
+    match story with 
+    | Story.Best -> fromBaseUrl "best"
+    | Story.Top  -> fromBaseUrl "top"
+    | Story.New  -> fromBaseUrl "new"
+    | Story.Job  -> fromBaseUrl "job"
+
+
+let fetchStoryItems (story: Story) =
+    let url = storiesEndpoint story
 
     async {
         let! status, responseText = Http.get url
@@ -123,7 +146,7 @@ let fetchStoryItems =
                 let! storyItems =
                     storyIds
                     |> List.truncate 10
-                    // |> List.map ( fun _ -> async { return Some { Id = 1; Title = "Test"; Url = Some "url" } })
+                    // |> List.map ( fun _ -> async { return Some { Id = 1; Title = "Test"; Url = Some "url"; Score = 12 } })
                     |> List.map fetchStoryItem
                     |> Async.Parallel
                     |> Async.map (Array.choose id >> List.ofArray)
@@ -150,7 +173,7 @@ let update (msg: Msg) (state: State) : State * Cmd<Msg> =
     | LoadStoryItems Started ->
         let newState = { state with StoryItems = InProgress }
 
-        newState, Cmd.fromAsync fetchStoryItems
+        newState, Cmd.fromAsync (fetchStoryItems state.CurrentStory)
 
     | LoadStoryItems (Finished (Ok storyItems)) ->
         let newState = { state with StoryItems = Resolved (Ok storyItems)}
@@ -162,11 +185,71 @@ let update (msg: Msg) (state: State) : State * Cmd<Msg> =
 
         newState, Cmd.none
 
+    | ChangeStory story ->
+        let newState = { state with CurrentStory = story; StoryItems = InProgress }
+
+        newState, Cmd.fromAsync (fetchStoryItems story)
+
+
+// ========================================================
+// Render View
+// ========================================================
+
+let storyCategories = [
+    Story.New 
+    Story.Top
+    Story.Best 
+    Story.Job
+]
+
+
+let storyTitle story =
+    match story with
+    | Story.New -> "New"
+    | Story.Top -> "Top"
+    | Story.Best -> "Best"
+    | Story.Job -> "Job"
+
+
+let renderTabs selectedStory dispatch =
+    // dispatch Msg.ChangeStories from the one of the tabs 
+    // if it is not already selected.
+    let switchStory story =
+        if story <> selectedStory
+        then dispatch (ChangeStory story)
+        // else...?
+        // Do nothing if the current story is active (visible on screen)
+        // This is to make sure the clicking on the active tab won't reload the view.
+
+    Html.div [
+        prop.className [ "tabs"; "is-toggle"; "is-fullwidth" ]
+        prop.children [
+            Html.ul [
+                for story in storyCategories ->
+                    Html.li [
+                        prop.className [ if story = selectedStory then "is-active" ]
+                        prop.onClick (fun _ -> switchStory story)
+                        prop.children [
+                            Html.a [ Html.span (storyTitle story) ]
+                        ]
+
+                    ]
+            ]
+        ]
+    ]
+
 
 let renderError (errorMsg: string) = 
     Html.h1 [
         prop.style [ style.color.red ]
         prop.text errorMsg
+    ]
+
+
+let div (classes: string list) (children: ReactElement list) =
+    Html.div [
+        prop.classes classes
+        prop.children children
     ]
 
 
@@ -176,17 +259,34 @@ let renderItem item =
         prop.className "box"
         prop.style [ style.marginTop 15; style.marginBottom 15 ] 
         prop.children [
-            match item.Url with 
-            | Some url ->
-                Html.a [
-                    prop.style [ style.textDecoration.underline ]
-                    prop.target.blank
-                    prop.href url
-                    prop.text item.Title
+            div [ "columns"; "is-mobile" ] [
+                div [ "column"; "is-narrow" ] [
+                    Html.div [
+                        prop.className [ "icon" ]
+                        prop.style [ style.marginLeft 20 ]
+                        prop.children [
+                            Html.i [ prop.className "fa fa-poll fa-2x" ]
+                            Html.span [
+                                prop.style [ style.marginLeft 10; style.marginRight 10 ]
+                                prop.text (sprintf "Score: %d" item.Score)
+                            ]
+                        ]
+                    ]
                 ]
 
-            | None ->
-                Html.p item.Title
+                div [ "column" ] [
+                    match item.Url with 
+                    | Some url ->
+                        Html.a [
+                            prop.style [ style.textDecoration.underline ]
+                            prop.target.blank
+                            prop.href url
+                            prop.text item.Title
+                        ]
+
+                    | None -> Html.p item.Title
+                ]
+            ]
 
         ]
     ]
@@ -216,6 +316,7 @@ let renderItems = function
 
 
 let render (state: State) dispatch =
+
     Html.div [
         prop.style [ style.padding 20 ]
         prop.children [
@@ -224,6 +325,7 @@ let render (state: State) dispatch =
                 prop.text "ElmishHackernews"
             ]
 
+            renderTabs state.CurrentStory dispatch
             renderItems state.StoryItems
         ]
     ]
