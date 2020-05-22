@@ -11,7 +11,7 @@ open Thoth.Json
 
 
 
-type ValueStatus<'t> =
+type Deferred<'t> =
     | NotStarted
     | InProgress
     | Resolved of 't
@@ -38,21 +38,30 @@ type Story =
     | Job 
 
 
+type DeferredResult<'t> = Deferred<Result<'t, string>>
+
+
+// type DeferredStoryItem = DeferredResult<HackerNewsItem>
+
+// The "outer" asynchronous operation is responsible for loading 
+// the IDs of the story items from the Hackernews API 
+// and from there we initialize the "inner" asynchronous states for the story items. 
 type State = {
     CurrentStory: Story
-    StoryItems: ValueStatus<Result<HackerNewsItem list, string>>
+    StoryItems: DeferredResult<Map<int, DeferredResult<HackerNewsItem>>>
 }
 
 
 type Msg =
     | ChangeStory of Story
-    | LoadStoryItems of AsyncStatus<Result<HackerNewsItem list, string>>
+    | LoadStoryIdentifiers of AsyncStatus<Result<int list, string>>
+    | LoadStoryItem of int * Result<HackerNewsItem, string> // Why no async status?
 
 
 
 let init() =
     let initState = { CurrentStory = Story.New; StoryItems = NotStarted }
-    let initCommand = Cmd.ofMsg (LoadStoryItems Started)
+    let initCommand = Cmd.ofMsg (LoadStoryIdentifiers Started)
     initState, initCommand
 
 
@@ -117,10 +126,10 @@ let fetchStoryItem (id: int) =
         match status with 
         | 200 -> 
             match parseHackerNewsItem responseText with
-            | Ok item -> return Some item
-            | Error _ -> return None
+            | Ok item -> return LoadStoryItem (id, (Ok item))
+            | Error cause -> return LoadStoryItem (id, (Error cause))
 
-        | _   -> return None
+        | _   -> return LoadStoryItem (id, (Error "Couldn't load post"))
     }
 
 let storiesEndpoint story =
@@ -148,18 +157,18 @@ let fetchStoryItems (story: Story) =
                     |> List.truncate 10
                     // |> List.map ( fun _ -> async { return Some { Id = 1; Title = "Test"; Url = Some "url"; Score = 12 } })
                     |> List.map fetchStoryItem
-                    |> Async.Parallel
+                    |> Async.Parallel // TODO: Remove this!!!!!
                     |> Async.map (Array.choose id >> List.ofArray)
 
-                return LoadStoryItems (Finished (Ok storyItems))
+                return LoadStoryIdentifiers (Finished (Ok storyItems))
 
             | Error errorMsg ->
                 // Could not parse the array of story IDs
-                return LoadStoryItems (Finished (Error errorMsg))
+                return LoadStoryIdentifiers (Finished (Error errorMsg))
 
         | _ ->
             // Non-OK response finishes with an error
-            return LoadStoryItems (Finished (Error "Network error: Couldn't load stories"))
+            return LoadStoryIdentifiers (Finished (Error "Network error: Couldn't load stories"))
     }
 
 
@@ -170,17 +179,19 @@ let fetchStoryItems (story: Story) =
 
 let update (msg: Msg) (state: State) : State * Cmd<Msg> =
     match msg with 
-    | LoadStoryItems Started ->
+    | LoadStoryIdentifiers Started ->
         let newState = { state with StoryItems = InProgress }
 
         newState, Cmd.fromAsync (fetchStoryItems state.CurrentStory)
 
-    | LoadStoryItems (Finished (Ok storyItems)) ->
-        let newState = { state with StoryItems = Resolved (Ok storyItems)}
+    | LoadStoryIdentifiers (Finished (Ok storyIds)) ->
+        let storiesMap = Map.ofList [ for id in storyIds do id, Deferred.InProgress ]
 
-        newState, Cmd.none
+        let newState = { state with StoryItems = Resolved (Ok storiesMap)}
 
-    | LoadStoryItems (Finished (Error error)) ->
+        newState, Cmd.batch [ for id in storyIds -> Cmd.fromAsync (fetchStoryItem id) ]
+
+    | LoadStoryIdentifiers (Finished (Error error)) ->
         let newState = { state with StoryItems = Resolved (Error error)}
 
         newState, Cmd.none
@@ -189,6 +200,35 @@ let update (msg: Msg) (state: State) : State * Cmd<Msg> =
         let newState = { state with CurrentStory = story; StoryItems = InProgress }
 
         newState, Cmd.fromAsync (fetchStoryItems story)
+
+    | LoadStoryItem (id, (Ok item)) ->
+
+        match state.StoryItems with
+        | Resolved (Ok storiesMap) ->
+            // Map.add if a key already exists, its value will be updated with the new value.
+            let newStoriesMap =
+                storiesMap |> Map.add id (Resolved (Ok item))
+
+            let newState = { state with StoryItems = Resolved (Ok newStoriesMap) }
+            newState, Cmd.none
+
+        // State sink
+        | _ -> state, Cmd.none
+
+    | LoadStoryItem (id, (Error message)) ->
+        match state.StoryItems with 
+        | Resolved (Ok storiesMap) ->
+            let newStoriesMap =
+                storiesMap |> Map.add id (Resolved (Error message))
+
+            let newState = { state with StoryItems = Resolved (Ok newStoriesMap) }
+            newState, Cmd.none
+
+        // state sink
+        | _ -> state, Cmd.none
+
+            
+
 
 
 // ========================================================
