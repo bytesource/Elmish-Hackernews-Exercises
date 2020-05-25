@@ -55,7 +55,13 @@ type State = {
 type Msg =
     | ChangeStory of Story
     | LoadStoryIdentifiers of AsyncStatus<Result<int list, string>>
-    | LoadStoryItem of int * Result<HackerNewsItem, string> // Why no async status?
+    | LoadStoryItem of int * Result<HackerNewsItem, string> 
+    // Why no async status?
+    // Answer by the author:
+    // Because we don't need to know whether the operation has started or not. 
+    // As soon as the IDs of the story items are loaded, 
+    // the asynchronous state of each item is Deferred.InProgress
+
 
 
 
@@ -152,13 +158,9 @@ let fetchStoryItems (story: Story) =
         | 200 ->
             match parseHackerNewsIds responseText with
             | Ok (storyIds) ->
-                let! storyItems =
+                let storyItems =
                     storyIds
                     |> List.truncate 10
-                    // |> List.map ( fun _ -> async { return Some { Id = 1; Title = "Test"; Url = Some "url"; Score = 12 } })
-                    |> List.map fetchStoryItem
-                    |> Async.Parallel // TODO: Remove this!!!!!
-                    |> Async.map (Array.choose id >> List.ofArray)
 
                 return LoadStoryIdentifiers (Finished (Ok storyItems))
 
@@ -293,7 +295,7 @@ let div (classes: string list) (children: ReactElement list) =
     ]
 
 
-let renderItem item =
+let renderItemContent item =
     Html.div [
         prop.key item.Id
         prop.className "box"
@@ -343,16 +345,44 @@ let spinner =
     ]
 
 
-let renderItems = function
-    | NotStarted -> Html.div "Not started yet"
+let renderStoryItem (itemId: int) storyItem =
+    let renderedItem =
+        match storyItem with
+        | NotStarted -> Html.none
+        | InProgress -> spinner
+        | Resolved (Ok item) -> renderItemContent item
+        | Resolved (Error cause) -> renderError cause
+
+    Html.div [
+        prop.key itemId
+        prop.className "box"
+        prop.style [ style.marginTop 15; style.marginBottom 15 ]
+        prop.children [ renderedItem ]
+
+    ]
+
+
+let renderStoryItems items = 
+    match items with
+    | NotStarted -> Html.none
 
     | InProgress -> spinner
 
     | Resolved (Ok storyItems) ->
-        React.fragment [ for item in storyItems do renderItem item ]
+        storyItems
+        |> Map.toList
+        |> List.map (fun (id, item) -> renderStoryItem id item)
+        |> Html.div
 
     | Resolved (Error error) ->
         renderError error
+
+
+let title = 
+    Html.h1 [
+        prop.className "title"
+        prop.text "Elmish Hacker News"
+    ]
 
 
 let render (state: State) dispatch =
@@ -360,13 +390,9 @@ let render (state: State) dispatch =
     Html.div [
         prop.style [ style.padding 20 ]
         prop.children [
-            Html.h1 [
-                prop.className "title"
-                prop.text "ElmishHackernews"
-            ]
-
+            title
             renderTabs state.CurrentStory dispatch
-            renderItems state.StoryItems
+            renderStoryItems state.StoryItems
         ]
     ]
 
