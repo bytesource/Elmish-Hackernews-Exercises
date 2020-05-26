@@ -27,6 +27,7 @@ type HackerNewsItem = {
     Title: string
     Url: string option
     Score: int
+    Time: int
 }
 
 
@@ -115,6 +116,7 @@ let hackerNewsItemDecoder : Decoder<HackerNewsItem> =
         Title = field.Required.At [ "title" ] Decode.string
         Url = field.Optional.At [ "url" ] Decode.string
         Score = field.Required.At [ "score" ] Decode.int
+        Time = field.Required.At [ "time" ] Decode.int
     })
 
  
@@ -362,6 +364,8 @@ let renderStoryItem (itemId: int) storyItem =
     ]
 
 
+
+
 let renderStoryItems items = 
     match items with
     | NotStarted -> Html.none
@@ -369,8 +373,8 @@ let renderStoryItems items =
     | InProgress -> spinner
 
     | Resolved (Ok storyItems) ->
-        storyItems
-        |> Map.toList
+        storyItems 
+        |> Map.toList 
         |> List.map (fun (id, item) -> renderStoryItem id item)
         |> Html.div
 
@@ -392,7 +396,7 @@ let render (state: State) dispatch =
         prop.children [
             title
             renderTabs state.CurrentStory dispatch
-            renderStoryItems state.StoryItems
+            renderStoryItems state.StoryItems 
         ]
     ]
 
