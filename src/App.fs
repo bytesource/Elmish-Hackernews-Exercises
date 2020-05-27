@@ -2,6 +2,8 @@ module App
 
 // https://github.com/HackerNews/API
 
+open System
+
 open Elmish
 open Elmish.React
 open Feliz
@@ -27,6 +29,7 @@ type HackerNewsItem = {
     Title: string
     Url: string option
     Score: int
+    Published: int64
 }
 
 
@@ -115,6 +118,7 @@ let hackerNewsItemDecoder : Decoder<HackerNewsItem> =
         Title = field.Required.At [ "title" ] Decode.string
         Url = field.Optional.At [ "url" ] Decode.string
         Score = field.Required.At [ "score" ] Decode.int
+        Published = field.Required.At [ "time" ] Decode.int64
     })
 
  
@@ -125,8 +129,10 @@ let parseHackerNewsItem json =
 
 let fetchStoryItem (id: int) =
     let url = sprintf "https://hacker-news.firebaseio.com/v0/item/%d.json" id
+    let rnd = Random()
 
     async {
+        do! Async.Sleep (rnd.Next(1000, 1500))  // Simulating network latency
         let! status, responseText = Http.get url
 
         match status with 
@@ -291,8 +297,24 @@ let renderError (errorMsg: string) =
 let div (classes: string list) (children: ReactElement list) =
     Html.div [
         prop.classes classes
-        prop.children children
+        prop.children children  
     ]
+
+
+// https://gist.github.com/FaguiCurtain/9d2d835758e845cdd3055ef2b2555fab#file-apitest-fsx-L12
+let toDateTime (timestamp:int64) =
+    let start = DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)
+    start.AddSeconds(float timestamp).ToLocalTime()
+
+
+let formatDate(timestamp:int64) =
+    toDateTime(timestamp).ToString("dd-MM-yy")
+
+
+let formatTime (timestamp:int64) =
+    let time = toDateTime timestamp
+    let padZero n = if n < 10 then sprintf "0%d" n else string n
+    sprintf "%s:%s:%s" (padZero time.Hour) (padZero time.Minute) (padZero time.Second)
 
 
 let renderItemContent item =
@@ -302,7 +324,7 @@ let renderItemContent item =
         prop.style [ style.marginTop 15; style.marginBottom 15 ] 
         prop.children [
             div [ "columns"; "is-mobile" ] [
-                div [ "column"; "is-narrow" ] [
+                div [ "column" ] [
                     Html.div [
                         prop.className [ "icon" ]
                         prop.style [ style.marginLeft 20 ]
@@ -311,6 +333,10 @@ let renderItemContent item =
                             Html.span [
                                 prop.style [ style.marginLeft 10; style.marginRight 10 ]
                                 prop.text (sprintf "Score: %d" item.Score)
+                            ]
+                            Html.span [
+                                prop.style [ style.marginLeft 10; style.marginRight 10 ]
+                                prop.text (sprintf "%s %s" (formatDate item.Published) (formatTime item.Published))
                             ]
                         ]
                     ]
@@ -362,6 +388,12 @@ let renderStoryItem (itemId: int) storyItem =
     ]
 
 
+// https://gist.github.com/FaguiCurtain/9d2d835758e845cdd3055ef2b2555fab#file-apitest-fsx-L20
+let toUnixTimeSeconds (d:DateTime) : int64 = 
+    let start = DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)
+    int64 (d - start).TotalSeconds
+
+
 let renderStoryItems items = 
     match items with
     | NotStarted -> Html.none
@@ -369,10 +401,36 @@ let renderStoryItems items =
     | InProgress -> spinner
 
     | Resolved (Ok storyItems) ->
+        let resolvedItems, remainingItems =
+            storyItems
+            |> Map.toList
+            |> List.sortBy (fun (_, item) -> // Sort by publish date
+                match item with
+                | Resolved (Ok post) -> post.Published
+                | _ -> toUnixTimeSeconds(DateTime.Now)) // Current Unix timestamp. Always larger than timestamp at 'Published'.
+            |> List.partition (fun (_, item) -> // Partition out sucessfully loaded posts
+                match item with
+                | Resolved (Ok post) -> true
+                | _ -> false)
+
+        Html.div [
+            resolvedItems  |> List.map (fun (id, item) -> renderStoryItem id item) |> Html.div
+            remainingItems |> List.map (fun (id, item) -> renderStoryItem id item) |> Html.div
+        ]
+
+
+
+
+        (*
         storyItems
         |> Map.toList
+        |> List.sortBy (fun (_, item) ->
+            match item with
+            | Resolved (Ok post) -> post.Published
+            | _ -> toUnixTimeSeconds(DateTime.Now)) // Current Unix timestamp. Always larger than timestamp at 'Published'.
         |> List.map (fun (id, item) -> renderStoryItem id item)
         |> Html.div
+        *)
 
     | Resolved (Error error) ->
         renderError error
