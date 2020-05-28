@@ -401,30 +401,15 @@ let renderStoryItems items =
     | InProgress -> spinner
 
     | Resolved (Ok storyItems) ->
-        let resolvedItems, remainingItems =
-            storyItems 
-            |> Map.toList
-            |> List.partition (fun (_, item) ->
-                match item with
-                | Resolved (Ok _) -> true
-                | _ -> false)
-
-        let resolvedItemsSorted =
-            resolvedItems
-            |> List.sortByDescending (fun (_, item) -> // Sort by publish date
-                match item with
-                | Resolved (Ok post) -> post.Published
-                | _ -> DateTime.Now) // Current time is always larger than 'Published'.
-
-        Html.div [
-            resolvedItemsSorted
-                |> List.map (fun (id, item) -> renderStoryItem id item) 
-                |> Html.div
-
-            remainingItems
-                |> List.map (fun (id, item) -> renderStoryItem id item) 
-                |> Html.div
-        ]
+        storyItems 
+        |> Map.toList
+        // Sort: Successfully resolved items at the top, starting with the most recent post.
+        |> List.sortByDescending (fun (_, item) -> 
+            match item with
+            | Resolved (Ok post) -> post.Published
+            | _ -> DateTime.MinValue) 
+        |> List.map (fun (id, item) -> renderStoryItem id item)
+        |> Html.div
 
     | Resolved (Error error) ->
         renderError error
