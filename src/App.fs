@@ -9,8 +9,8 @@ open Elmish.React
 open Feliz
 
 open Fable.SimpleHttp
+open Fable.DateFunctions
 open Thoth.Json
-
 
 
 type Deferred<'t> =
@@ -316,6 +316,7 @@ let formatTime (time:DateTime) =
     let padZero n = if n < 10 then sprintf "0%d" n else string n
     sprintf "%s:%s:%s" (padZero time.Hour) (padZero time.Minute) (padZero time.Second)
 
+open Fable.Core.JsInterop
 
 let renderItemContent item =
     Html.div [
@@ -336,7 +337,14 @@ let renderItemContent item =
                             ]
                             Html.span [
                                 prop.style [ style.marginLeft 10; style.marginRight 10 ]
-                                prop.text (sprintf "%s %s" (formatDate item.Published) (formatTime item.Published))
+                                let pubDate = item.Published
+                                // type IDistanceInWords implementations:
+                                // https://github.com/Zaid-Ajaj/Fable.DateFunctions/blob/master/src/DateFns.fs#L40
+                                // createEmpty<'T> is part of the Fable.Core.JsInterop module
+                                let formatOptions = createEmpty<IDistanceInWordsOptions>
+                                // IDistanceInWords actual usage in code:
+                                // https://github.com/Zaid-Ajaj/Fable.DateFunctions/blob/master/app/View.fs#L79
+                                prop.text (sprintf "%s ago" (pubDate.DistanceInWordsToNow(formatOptions)))
                             ]
                         ]
                     ]
