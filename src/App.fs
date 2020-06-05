@@ -24,7 +24,7 @@ type AsyncStatus<'t> =
     | Finished of 't
 
 
-type HackerNewsItem = {
+type HackernewsItem = {
     Id: int
     Title: string
     Url: string option
@@ -51,14 +51,17 @@ type DeferredResult<'t> = Deferred<Result<'t, string>>
 // and from there we initialize the "inner" asynchronous states for the story items. 
 type State = {
     CurrentStory: Story
-    StoryItems: DeferredResult<Map<int, DeferredResult<HackerNewsItem>>>
+    StoryItems: DeferredResult<Map<int, DeferredResult<HackernewsItem>>>
+    ItemsInQueue: int list
 }
 
 
 type Msg =
     | ChangeStory of Story
     | LoadStoryIdentifiers of AsyncStatus<Result<int list, string>>
-    | LoadStoryItem of int * Result<HackerNewsItem, string> 
+    | LoadStoryItem of int * Result<HackernewsItem, string>
+    // | LoadStoryItem of int * AsyncStatus<Result<HackernewsItem, string>>
+    | LoadMoreItems
     // Why no async status?
     // Answer by the author:
     // Because we don't need to know whether the operation has started or not. 
@@ -69,7 +72,7 @@ type Msg =
 
 
 let init() =
-    let initState = { CurrentStory = Story.New; StoryItems = NotStarted }
+    let initState = { CurrentStory = Story.New; StoryItems = NotStarted; ItemsInQueue = [] }
     let initCommand = Cmd.ofMsg (LoadStoryIdentifiers Started)
     initState, initCommand
 
@@ -117,7 +120,7 @@ let parseHackerNewsIds json =
     Decode.fromString (Decode.list Decode.int) json
 
 // https://hacker-news.firebaseio.com/v0/item/21558013.json?print=pretty
-let hackerNewsItemDecoder : Decoder<HackerNewsItem> =
+let hackerNewsItemDecoder : Decoder<HackernewsItem> =
     Decode.object (fun field ->
     {
         Id = field.Required.At [ "id" ] Decode.int
@@ -173,7 +176,7 @@ let fetchStoryItems (story: Story) =
             | Ok (storyIds) ->
                 let storyItems =
                     storyIds
-                    |> List.truncate 10
+                    // |> List.truncate 10
 
                 return LoadStoryIdentifiers (Finished (Ok storyItems))
 
@@ -187,6 +190,31 @@ let fetchStoryItems (story: Story) =
     }
 
 
+let postCount = 10
+
+
+module List =
+    
+    /// Divides the input list into a tuple of two lists.
+    /// The first list is of length 'n' (or less, if the length of the input list is smaller than 'n')
+    /// The second list takes the remaining items of the input list (if any).
+    let divideAt (n: int) (inputList: 'T list)  =
+        let left  = inputList |> List.truncate n
+        let right = inputList |> Seq.skip left.Length |> Seq.toList
+
+        left, right
+
+
+module Map =
+    
+    /// Merges two maps of the same type.
+    /// If a key in the second map is already present in the first map,
+    /// the second value overrides the first.
+    let merge m1 m2 = 
+        let newMap = Map.fold (fun merged key value -> 
+            merged |> Map.add key value) m1 m2
+
+        newMap
 
 
 // ============================================== Helpers - End
@@ -199,12 +227,31 @@ let update (msg: Msg) (state: State) : State * Cmd<Msg> =
 
         newState, Cmd.fromAsync (fetchStoryItems state.CurrentStory)
 
-    | LoadStoryIdentifiers (Finished (Ok storyIds)) ->
-        let storiesMap = Map.ofList [ for id in storyIds do id, Deferred.InProgress ]
+    | LoadStoryIdentifiers (Finished (Ok storyIds)) -> // TODO:
 
-        let newState = { state with StoryItems = Resolved (Ok storiesMap)}
+        let selectedIds, remainingIds = storyIds |> List.divideAt postCount
 
-        newState, Cmd.batch [ for id in storyIds -> Cmd.fromAsync (fetchStoryItem id) ]
+        let storiesMap = Map.ofList [ for id in selectedIds do id, Deferred.InProgress ]
+
+        let newState = { state with ItemsInQueue = remainingIds; StoryItems = Resolved (Ok storiesMap)}
+
+        newState, Cmd.batch [ for id in selectedIds -> Cmd.fromAsync (fetchStoryItem id) ]
+
+    | LoadMoreItems ->
+        let selectedIds, remainingIds = List.divideAt postCount state.ItemsInQueue
+
+        let newStoriesMap = Map.ofList [ for id in selectedIds do id, Deferred.InProgress ]
+
+        match state.StoryItems with 
+            | Resolved (Ok currentStoriesMap) -> 
+                let mergedStoriesMap = Map.merge currentStoriesMap newStoriesMap
+                let newState = { state with ItemsInQueue = remainingIds; StoryItems = Resolved (Ok mergedStoriesMap) }
+
+                newState, Cmd.batch [ for id in selectedIds do Cmd.fromAsync (fetchStoryItem id)]
+
+            | _ -> // State sink 
+                state, Cmd.none
+
 
     | LoadStoryIdentifiers (Finished (Error error)) ->
         let newState = { state with StoryItems = Resolved (Error error)}
@@ -316,7 +363,9 @@ let formatTime (time:DateTime) =
     let padZero n = if n < 10 then sprintf "0%d" n else string n
     sprintf "%s:%s:%s" (padZero time.Hour) (padZero time.Minute) (padZero time.Second)
 
+
 open Fable.Core.JsInterop
+
 
 let renderItemContent item =
     Html.div [
@@ -338,7 +387,7 @@ let renderItemContent item =
                             Html.span [
                                 prop.style [ style.marginLeft 10; style.marginRight 10 ]
                                 let pubDate = item.Published
-                                // type IDistanceInWords implementations:
+                                // type IDistanceInWords implementation:
                                 // https://github.com/Zaid-Ajaj/Fable.DateFunctions/blob/master/src/DateFns.fs#L40
                                 // createEmpty<'T> is part of the Fable.Core.JsInterop module
                                 let formatOptions = createEmpty<IDistanceInWordsOptions>
@@ -411,7 +460,7 @@ let renderStoryItems items =
     | Resolved (Ok storyItems) ->
         storyItems 
         |> Map.toList
-        // Sort: Successfully resolved items at the top, starting with the most recent post.
+        // Sort: Successfully resolved items move to the top, starting with the most recent post.
         |> List.sortByDescending (fun (_, item) -> 
             match item with
             | Resolved (Ok post) -> post.Published
@@ -430,6 +479,36 @@ let title =
     ]
 
 
+let itemsStillLoading (state: State) =
+    match state.StoryItems with
+    | Resolved (Ok storyItems) ->
+        storyItems
+        |> Map.toList
+        |> List.exists (fun (_, item) -> 
+            match item with
+            | NotStarted | InProgress -> true
+            | Resolved _ -> false)
+
+    | _ -> false 
+
+
+let renderLoadMoreButton (state: State) dispatch =
+    Html.nav [
+        prop.classes [ "navbar"; "is-fixed-bottom"]
+        prop.children [
+            if state.ItemsInQueue |> List.isEmpty
+            then Html.none
+            else
+                Html.button [
+                    prop.disabled (itemsStillLoading state)
+                    prop.onClick (fun _ -> dispatch LoadMoreItems)
+                    prop.text "Load More"
+                ]
+        ]
+    ]
+
+
+
 let render (state: State) dispatch =
 
     Html.div [
@@ -437,7 +516,8 @@ let render (state: State) dispatch =
         prop.children [
             title
             renderTabs state.CurrentStory dispatch
-            renderStoryItems state.StoryItems 
+            renderStoryItems state.StoryItems
+            renderLoadMoreButton state dispatch 
         ]
     ]
 
